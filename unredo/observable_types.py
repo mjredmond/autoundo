@@ -39,6 +39,7 @@ from collections import OrderedDict
 
 from copy import copy
 import numpy as np
+from array import array
 from zlib import compress, decompress
 
 
@@ -46,13 +47,29 @@ _observables = {}
 
 immutables = frozenset([int, float, str, bytes, frozenset])
 
+_counter = 0
+
+
+def reset_counter():
+    global _counter
+    _counter = 0
+
+
+def _increment_counter():
+    global _counter
+    _counter += 1
+
 
 def register_observable(cls):
     for type_ in cls.types:
+        if type_ in _observables:
+            raise ValueError('Observable for type %s has already been registered!' % str(type_))
         _observables[type_] = cls
 
     return cls
 
+
+# helper functions
 
 def get_observable(base_obj, observable_ids):
 
@@ -60,30 +77,14 @@ def get_observable(base_obj, observable_ids):
         try:
             return _observables[type(base_obj)](base_obj)
         except KeyError:
-            raise TypeError('Cannot create observable for type %s.  You need to provide an implementation of AbstractObservable.' % str(type(base_obj)))
+            raise TypeError(
+                'Cannot create observable for type %s.  '
+                'You need to provide an implementation of AbstractObservable.' % str(type(base_obj))
+            )
 
-    obj = get_obj(base_obj, observable_ids)
+    objs = get_all_objs(base_obj, observable_ids)
 
-    if type(obj) in immutables:
-
-
-    try:
-        _observable_type = _observables[type(obj)]
-    except KeyError as e:
-        mro = set(getmro(type(base_obj)))
-        match = mro.union(set(_observables))
-
-        if len(match) == 0:
-            raise e
-
-        _observable_type = _observables[match.pop()]
-
-    _observable = _observable_type(obj)
-
-    if len(observable_ids) == 1:
-        return _observable
-    else:
-
+    return AttributeObservable(objs[0], observable_ids)
 
 
 def get_obj(base_obj, observable_ids):
@@ -95,12 +96,49 @@ def get_obj(base_obj, observable_ids):
     return obj
 
 
+def get_all_objs(base_obj, observable_ids):
+    objs = [base_obj]
+
+    obj = base_obj
+
+    for _id in observable_ids[1:]:
+        obj = getattr(obj, _id)
+        objs.append(obj)
+
+    return objs
+
+
+# observable classes
+
 class AbstractObservable(object):
+    def __init__(self):
+        global _counter
+        self.counter = _counter
+        _increment_counter()
+
+        self._observable_id = None
+
+    @property
+    def observable_id(self):
+        return self._observable_id
+
     def get_state(self):
         raise NotImplementedError
 
     def set_state(self, state):
         raise NotImplementedError
+
+    def restore(self):
+        raise NotImplementedError
+
+    def __eq__(self, other):
+        if self.__class__ is not other.__class__:
+            return False
+
+        if self.get_state() != other.get_state():
+            return False
+
+        return True
 
 
 class MutableObservable(AbstractObservable):
@@ -108,37 +146,102 @@ class MutableObservable(AbstractObservable):
     types = ()
 
     def __init__(self, obj):
+        super(MutableObservable, self).__init__()
+
         assert isinstance(obj, self.types)
         self.obj = obj
+
+        self.initial_state = self.get_state()
+
+        self._observable_id = id(self.obj)
+
+    def restore(self):
+        self.set_state(self.initial_state)
+
+
+class ImmutableObserver(AbstractObservable):
+    def __init__(self, value):
+        super(ImmutableObserver, self).__init__()
+
+        self.value = value
+        self.initial_state = value
+
+    def get_state(self):
+        return self.value
+
+    def set_state(self, state):
+        self.value = state
+
+    def restore(self):
+        self.value = self.initial_state
 
 
 class Undefined(object):
     pass
 
 
-class ImmutableObservable(MutableObservable):
+class AttributeObservable(AbstractObservable):
     def __init__(self, base_obj, observable_ids):
-        super(ImmutableObservable, self).__init__(base_obj)
+        super(AttributeObservable, self).__init__()
+
         self.base_obj = base_obj
         self.observable_ids = observable_ids
 
+        try:
+            obj = type(get_obj(self.base_obj, self.observable_ids))
+        except AttributeError:
+            obj = Undefined
+
+        if obj in immutables:
+            self._observable = None
+        else:
+            obj = get_obj(self.base_obj, self.observable_ids)
+            self._observable = get_observable(obj, self.observable_ids[-1:])
+            self.counter = self._observable.counter
+
+        self.initial_state = self.get_state()
+
+        self._observable_id = (id(self.base_obj), '.'.join(self.observable_ids))
+
+    def restore(self):
+        self.set_state(self.initial_state)
+
+        try:
+            self._observable.restore()
+        except AttributeError:
+            pass
+
     def get_state(self):
         try:
-            get_obj(self.base_obj, self.observable_ids)
+            obj = get_obj(self.base_obj, self.observable_ids)
         except AttributeError:
-            return Undefined
+            obj = Undefined
+
+        try:
+            obj_state = self._observable.get_state()
+        except AttributeError:
+            obj_state = Undefined
+
+        return obj, obj_state
 
     def set_state(self, state):
+        obj, obj_state = state
+
+        if obj_state is not Undefined:
+            self._observable.set_state(obj_state)
+
         try:
-            obj = get_obj(self.base_obj, self.observable_ids[:-1])
+            obj_ = get_obj(self.base_obj, self.observable_ids[:-1])
         except AttributeError:
             raise RuntimeError('Cannot find base object for immutable in %s!' % '.'.join(self.observable_ids))
 
-        if state is Undefined:
-            delattr(obj, self.observable_ids[-1])
+        if obj is Undefined:
+            delattr(obj_, self.observable_ids[-1])
         else:
-            setattr(obj, self.observable_ids[-1], state)
+            setattr(obj_, self.observable_ids[-1], obj)
 
+
+# concrete implementations below
 
 @register_observable
 class ListObservable(MutableObservable):
@@ -172,9 +275,22 @@ class NumpyObservable(MutableObservable):
     types = (np.ndarray,)
 
     def get_state(self):
-        return compress(self.obj.tobytes(), level=9), self.obj.dtype, self.obj.shape
+        return compress(self.obj.tobytes()), self.obj.dtype, self.obj.shape
 
     def set_state(self, state):
-        arr = np.frombuffer(decompress(state[0]), dtype=state[1]).astype(dtype=state[1].reshape(state[2]))
+        arr = np.frombuffer(decompress(state[0]), dtype=state[1]).astype(dtype=state[1]).reshape(state[2])
         self.obj.resize(state[2])
         np.copyto(self.obj, arr)
+
+
+@register_observable
+class PyArrayObservable(MutableObservable):
+
+    types = (array,)
+
+    def get_state(self):
+        return compress(self.obj.tobytes())
+
+    def set_state(self, state):
+        del self.obj[:]
+        self.obj.frombytes(decompress(state))
