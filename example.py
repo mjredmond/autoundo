@@ -34,3 +34,53 @@ from __future__ import print_function, absolute_import
 from six import iteritems, iterkeys, itervalues
 from six.moves import range
 
+from unredo import UnRedo
+
+import numpy as np
+
+undo_stack = UnRedo('mystack')
+
+
+some_list = []
+
+
+class MyVal(object):
+    def __init__(self, data):
+        self.data = data
+
+
+@undo_stack(
+    ('a.data', 'b', 'c', 'globals.some_list'),
+    global_dict=globals()
+)
+def f1(a, b, c):
+    a.data += [1, 2, 3]
+
+    a.data = np.array([-5, -4, -3, -2, -1])
+
+    b.insert(0, 1)
+    some_list.extend([6, 7, 8])
+
+    c += 1
+
+    return True
+
+
+a = MyVal(np.array([-1, -2, -3]))
+b = []
+c = np.array([0, 0, 0, 0, 0])
+
+print(a.data, b, c, some_list)
+
+f1(a, b, c)
+
+print(a.data, b, c, some_list)
+
+undo_stack.undo()
+
+print(a.data, b, c, some_list)
+
+undo_stack.redo()
+
+print(a.data, b, c, some_list)
+
