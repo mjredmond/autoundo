@@ -37,6 +37,8 @@ from six.moves import range
 
 from inspect import signature
 
+from .observable_types import get_observable, reset_counter
+
 
 class UnRedo(object):
     def __init__(self, name):
@@ -77,6 +79,7 @@ class UnRedo(object):
         if self._macro_on:
             return None
 
+        reset_counter()
         self._macro_on = True
         self._current_actions = []
         return True
@@ -105,7 +108,39 @@ class UnRedo(object):
         self._current_actions.append(action)
 
     def _condense(self):
-        pass
+        _current_actions = self._current_actions
+
+        _initial_actions = {}
+        _final_actions = {}
+
+        for action in _current_actions:
+            for arg in action.initial_args:
+                try:
+                    _initial_actions[arg.observable_id].append(arg)
+                except KeyError:
+                    _initial_actions[arg.observable_id] = [arg]
+
+            for arg in action.final_args:
+                try:
+                    _final_actions[arg.observable_id].append(arg)
+                except KeyError:
+                    _final_actions[arg.observable_id] = [arg]
+
+        _keys = list(_initial_actions.keys())
+
+        _initial_args = []
+
+        for key in _keys:
+            _initial_args.append(sorted(_initial_actions[key], key=lambda a: a.counter)[0])
+
+        _keys = list(_final_actions.keys())
+
+        _final_args = []
+
+        for key in _keys:
+            _final_args.append(sorted(_final_actions[key], key=lambda a: a.counter)[-1])
+
+        self._current_actions = [UnRedoAction(_initial_args, _final_args)]
 
     def __call__(self, observables, global_dict=None):
 
@@ -156,9 +191,9 @@ class Observables(object):
         del self.param_indices[:]
         del self.split_params[:]
 
-        func_sig = signature(func)
+        self.func_sig = signature(func)
 
-        parameters = func_sig.parameters
+        parameters = self.func_sig.parameters
 
         param_pos = {}
         param_keyword = set()
@@ -204,12 +239,55 @@ class Observables(object):
     def get_args(self, global_dict, *args, **kwargs):
         args = self.func_sig.bind(*args, **kwargs).arguments
 
-        # return objects that get and set state
+        _observables = []
+
+        for i in range(len(self.observables)):
+            base_param = self.base_parameters[i]
+
+            if base_param == 'globals':
+                continue
+
+            split_params = self.split_params[i]
+
+            observable = get_observable(args[base_param], split_params)
+
+            _observables.append(observable)
+
+        for param in self.global_params:
+            observable = get_observable(global_dict, param.split('.'))
+
+            _observables.append(observable)
+
+        return _observables
 
 
+class UnRedoAction(object):
+    def __init__(self, initial_args, final_args):
+        self.initial_args = initial_args
+        self.final_args = final_args
 
-def create_actions(initial_values, final_values):
-    return None, None
+    def redo(self):
+        for arg in self.final_args:
+            arg.restore()
+
+    def undo(self):
+        for arg in self.initial_args:
+            arg.restore()
+
+
+def create_actions(initial_args, final_args):
+
+    _initial_args = []
+    _final_args = []
+
+    assert len(initial_args) == len(final_args)
+
+    for i in range(len(initial_args)):
+        if initial_args[i].initial_state != final_args[i].get_state():
+            _initial_args.append(initial_args[i])
+            _final_args.append(final_args[i])
+
+    return UnRedoAction(_initial_args, _final_args)
 
 
 class GlobalDict(object):
@@ -219,7 +297,7 @@ class GlobalDict(object):
 
 class UnRedoWrapper(object):
     def __init__(self, observables, global_dict, func, unredo):
-        self.observables, self.base_parameters, self.param_indices, self.split_observables = observables
+        self.observables = observables
         self.global_dict = global_dict
         self.func = func
         self.unredo = unredo
@@ -229,7 +307,7 @@ class UnRedoWrapper(object):
         if not self._enabled:
             return self.func(*args, **kwargs)
 
-        initial_values = self.observables.get_args(self.global_dict, *args, **kwargs)
+        initial_args = self.observables.get_args(self.global_dict, *args, **kwargs)
 
         owns_macro = self.unredo._begin_macro()
 
@@ -241,9 +319,9 @@ class UnRedoWrapper(object):
 
         assert isinstance(return_val, bool)
 
-        final_values = self.observables.get_args(self.global_dict, *args, **kwargs)
+        final_args = self.observables.get_args(self.global_dict, *args, **kwargs)
 
-        actions = create_actions(initial_values, final_values)
+        actions = create_actions(initial_args, final_args)
 
         self.unredo._submit_actions(actions)
 
@@ -256,33 +334,3 @@ class UnRedoWrapper(object):
 
     def enable(self):
         self._enabled = True
-
-
-def check():
-    print('hello')
-
-
-class Tmp(object):
-    def __init__(self):
-        self.func = check
-        self.__call__2 = self.__class__.__call__
-
-    def __call__(self, *args, **kwargs):
-        print('hello 2')
-
-    def __disabled_call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
-
-    def disable(self):
-        self.__class__.__call__ = self.__class__.__disabled_call__
-
-    def enable(self):
-        self.__class__.__call__ = self.__call__2
-
-
-a = Tmp()
-a()
-a.disable()
-a()
-a.enable()
-a()
