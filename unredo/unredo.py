@@ -36,12 +36,13 @@ from six import iteritems, iterkeys, itervalues
 from six.moves import range
 
 from inspect import signature
+from functools import wraps
 
 from .observable_types import get_observable, reset_counter
 
 
 class UnRedo(object):
-    def __init__(self, name):
+    def __init__(self, name, limit=100):
         self.name = name
 
         self._redo_actions = []
@@ -52,6 +53,17 @@ class UnRedo(object):
         self._macro_on = False
 
         self._wrappers = []
+
+        self._limit = limit
+
+        self._update_with_no_changes = True
+
+    def set_update_method(self, val):
+        assert isinstance(val, bool)
+        self._update_with_no_changes = val
+
+    def set_limit(self, limit):
+        self._limit = limit
 
     def undo(self):
         try:
@@ -86,21 +98,30 @@ class UnRedo(object):
 
     def _end_macro(self, owns_macro):
         if not owns_macro:
-            return
+            return False
 
         self._condense()
+
+        if self._update_with_no_changes is False and len(self._current_actions) == 0:
+            return False
+
         self._undo_actions.append(self._current_actions)
+        del self._redo_actions[:]
         self._current_actions = []
 
+        if len(self._undo_actions) > self._limit:
+            self._undo_actions.pop(0)
+
         self._macro_on = False
+
+        return True
 
     def _rollback(self, owns_macro):
         if not owns_macro:
             return
 
-        self._end_macro(owns_macro)
-
-        self.undo()
+        if self._end_macro(owns_macro):
+            self.undo()
 
         self._redo_actions.pop()
 
@@ -158,7 +179,7 @@ class UnRedo(object):
             observables_ = Observables()
             observables_.set_observables(func, observables)
 
-            inner_wrapper = UnRedoWrapper(observables_, global_dict, func, self)
+            inner_wrapper = wraps(func)(_UnRedoWrapper(observables_, global_dict, func, self))
 
             self._wrappers.append(inner_wrapper)
 
@@ -275,27 +296,16 @@ class UnRedoAction(object):
             arg.restore()
 
 
-def create_actions(initial_args, final_args):
-
-    _initial_args = []
-    _final_args = []
-
-    assert len(initial_args) == len(final_args)
-
-    for i in range(len(initial_args)):
-        if initial_args[i].initial_state != final_args[i].get_state():
-            _initial_args.append(initial_args[i])
-            _final_args.append(final_args[i])
-
-    return UnRedoAction(_initial_args, _final_args)
-
-
 class GlobalDict(object):
     def __init__(self, global_dict):
         self.__dict__ = global_dict
 
 
-class UnRedoWrapper(object):
+class _UnRedoWrapper(object):
+    """
+    Helper class for UnRedo.  It is the callable wrapper that is returned from the decorator.  It accesses
+    UnRedo private methods.
+    """
     def __init__(self, observables, global_dict, func, unredo):
         self.observables = observables
         self.global_dict = global_dict
@@ -317,11 +327,9 @@ class UnRedoWrapper(object):
             self.unredo._rollback(owns_macro)
             raise e
 
-        assert isinstance(return_val, bool)
-
         final_args = self.observables.get_args(self.global_dict, *args, **kwargs)
 
-        actions = create_actions(initial_args, final_args)
+        actions = _create_actions(initial_args, final_args)
 
         self.unredo._submit_actions(actions)
 
@@ -334,3 +342,18 @@ class UnRedoWrapper(object):
 
     def enable(self):
         self._enabled = True
+
+
+def _create_actions(initial_args, final_args):
+
+    _initial_args = []
+    _final_args = []
+
+    assert len(initial_args) == len(final_args)
+
+    for i in range(len(initial_args)):
+        if initial_args[i] != final_args[i]:
+            _initial_args.append(initial_args[i])
+            _final_args.append(final_args[i])
+
+    return UnRedoAction(_initial_args, _final_args)
