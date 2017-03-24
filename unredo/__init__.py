@@ -35,3 +35,6 @@ from six import iteritems, iterkeys, itervalues
 from six.moves import range
 
 from .unredo import UnRedo
+from .observable_types import (
+    register_observable, override_observable, AbstractObservable, MutableObservable, get_observable
+)
