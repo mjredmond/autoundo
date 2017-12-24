@@ -1,3 +1,5 @@
+from __future__ import print_function, absolute_import
+
 import builtins
 from array import array
 from collections import OrderedDict
@@ -619,7 +621,7 @@ def _get_func_params(func):
 ########################################################################################################################
 
 
-__autoundo_skip__ = True
+_autoundo_skip = True
 
 
 class AutoUndoWrapper(object):
@@ -740,7 +742,7 @@ class AutoUndo(object):
         m = self.old_imp(*args, **kwargs)
 
         try:
-            autoundo_skip = getattr(m, '__autoundo_skip__')
+            autoundo_skip = getattr(m, '_autoundo_skip')
         except AttributeError:
             autoundo_skip = False
 
